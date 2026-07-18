@@ -100,7 +100,7 @@ async function ocr(imageBuffer) {
 Responde SOLO con el JSON, sin texto adicional ni markdown.`;
 
   const response = await axios.post(
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
       contents: [{
         parts: [
@@ -109,12 +109,7 @@ Responde SOLO con el JSON, sin texto adicional ni markdown.`;
         ]
       }]
     },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': process.env.GEMINI_API_KEY
-      }
-    }
+    { headers: { 'Content-Type': 'application/json' } }
   );
 
   const text = response.data.candidates[0].content.parts[0].text.trim();
