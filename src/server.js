@@ -86,8 +86,8 @@ async function downloadTwilioMedia(mediaUrl) {
 
 // ─── OCR con Tesseract ────────────────────────────────────────────────────────
 async function ocr(imageBuffer) {
-  const { data: { text } } = await Tesseract.recognize(imageBuffer, 'spa', {
-    logger: () => {}
+  const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+    logger: () => {},
   });
   return text || '';
 }
