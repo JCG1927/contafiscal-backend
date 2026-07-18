@@ -3,8 +3,7 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const twilio = require('twilio');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 
 const app = express();
 app.use(express.json());
