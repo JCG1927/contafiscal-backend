@@ -84,10 +84,30 @@ async function downloadTwilioMedia(mediaUrl) {
   return Buffer.from(res.data);
 }
 
-// ─── OCR con Tesseract ────────────────────────────────────────────────────────
+// ─── Preprocesar imagen para mejor OCR ───────────────────────────────────────
+async function preprocesarImagen(imageBuffer) {
+  const sharp = require('sharp');
+  return await sharp(imageBuffer)
+    .resize({ width: 2000, withoutEnlargement: false }) // ampliar para mejor lectura
+    .grayscale()                                         // escala de grises
+    .normalize()                                         // normalizar brillo
+    .sharpen()                                           // nitidez
+    .toBuffer();
+}
+
+// ─── OCR con Tesseract mejorado ───────────────────────────────────────────────
 async function ocr(imageBuffer) {
-  const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+  let imgProcesada;
+  try {
+    imgProcesada = await preprocesarImagen(imageBuffer);
+  } catch(e) {
+    console.log('Preprocesamiento falló, usando imagen original:', e.message);
+    imgProcesada = imageBuffer;
+  }
+
+  const { data: { text } } = await Tesseract.recognize(imgProcesada, 'spa+eng', {
     logger: () => {},
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:-/$@# áéíóúÁÉÍÓÚñÑ',
   });
   return text || '';
 }
