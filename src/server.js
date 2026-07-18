@@ -1,9 +1,9 @@
 const express = require('express');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
-const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const cors = require('cors');
 const twilio = require('twilio');
+const Tesseract = require('tesseract.js');
 
 const app = express();
 app.use(express.json());
@@ -15,21 +15,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const vision = new ImageAnnotatorClient({
-  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON)
-});
-
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // ─── Webhook Twilio ───────────────────────────────────────────────────────────
 app.post('/webhook-twilio', async (req, res) => {
   res.sendStatus(200);
   try {
-    const from      = req.body.From;       // whatsapp:+18297203105
-    const numMedia  = parseInt(req.body.NumMedia || '0');
-    const body      = req.body.Body || '';
+    const from     = req.body.From;
+    const numMedia = parseInt(req.body.NumMedia || '0');
 
-    console.log(`Mensaje de ${from} | media: ${numMedia} | texto: ${body}`);
+    console.log(`Mensaje de ${from} | media: ${numMedia}`);
 
     if (numMedia === 0) {
       await sendTwilio(from,
@@ -42,26 +37,20 @@ app.post('/webhook-twilio', async (req, res) => {
     await sendTwilio(from, '⏳ Analizando tu factura... un momento.');
 
     // Descargar imagen desde Twilio
-    const mediaUrl  = req.body.MediaUrl0;
+    const mediaUrl    = req.body.MediaUrl0;
     const imageBuffer = await downloadTwilioMedia(mediaUrl);
 
-    // OCR con Google Vision
+    // OCR con Tesseract (local, gratis, sin tarjeta)
     const texto = await ocr(imageBuffer);
-    console.log('OCR:', texto.substring(0, 200));
+    console.log('OCR resultado:', texto.substring(0, 300));
 
-    // Parsear datos
+    // Parsear datos de la factura
     const factura = parsear(texto);
     factura.telefono_emisor = from.replace('whatsapp:', '');
     factura.fecha_registro  = new Date().toISOString();
     factura.fuente          = 'whatsapp';
-
-    if (factura.ncf) {
-      factura.categoria = 'fiscal';
-      factura.estado    = 'verified';
-    } else {
-      factura.categoria = 'gasto';
-      factura.estado    = 'verified';
-    }
+    factura.categoria       = factura.ncf ? 'fiscal' : 'gasto';
+    factura.estado          = 'verified';
 
     const { data, error } = await supabase
       .from('facturas')
@@ -76,10 +65,10 @@ app.post('/webhook-twilio', async (req, res) => {
       : respuestaGasto(factura);
 
     await sendTwilio(from, respuesta);
-    console.log(`Factura guardada [${factura.categoria}] id:${data.id}`);
+    console.log(`✅ Factura guardada [${factura.categoria}] id:${data.id}`);
 
   } catch (err) {
-    console.error('Error:', err.message);
+    console.error('❌ Error:', err.message);
   }
 });
 
@@ -95,16 +84,19 @@ async function downloadTwilioMedia(mediaUrl) {
   return Buffer.from(res.data);
 }
 
-// ─── OCR con Google Vision ────────────────────────────────────────────────────
+// ─── OCR con Tesseract ────────────────────────────────────────────────────────
 async function ocr(imageBuffer) {
-  const [result] = await vision.textDetection({ image: { content: imageBuffer } });
-  return result.textAnnotations?.[0]?.description || '';
+  const { data: { text } } = await Tesseract.recognize(imageBuffer, 'spa', {
+    logger: () => {}
+  });
+  return text || '';
 }
 
 // ─── Parser de facturas dominicanas ──────────────────────────────────────────
 function parsear(texto) {
-  const lineas  = texto.split('\n').map(l => l.trim()).filter(Boolean);
+  const lineas = texto.split('\n').map(l => l.trim()).filter(Boolean);
 
+  // NCF
   const ncfMatch = texto.match(/[BE]\d{2}\d{8,11}/i);
   const ncf      = ncfMatch ? ncfMatch[0].toUpperCase() : null;
 
@@ -112,25 +104,27 @@ function parsear(texto) {
   if (ncf) {
     const cod  = ncf.substring(0, 3).toUpperCase();
     const mapa = { B01:'Crédito Fiscal', B02:'Consumidor Final', B14:'Gubernamental', B15:'Regímenes Especiales', E31:'Electrónico CF' };
-    tipo_ncf = mapa[cod] || cod;
+    tipo_ncf   = mapa[cod] || cod;
   }
 
+  // RNC
   const rncMatch = texto.match(/\d{1}-\d{2}-\d{5}-\d|\b\d{9}\b/);
   const rnc      = rncMatch ? rncMatch[0] : null;
 
+  // Monto total
   let monto = null;
   const montoPatrones = [
-    /total\s*rd?\$?\s*([\d,\.]+)/i,
+    /total\s*r?d?\$?\s*([\d,\.]+)/i,
     /total\s*rds\s*([\d,\.]+)/i,
-    /importe\s*rd?\$?\s*([\d,\.]+)/i,
-    /monto\s*rd?\$?\s*([\d,\.]+)/i,
-    /total\s*:\s*([\d,\.]+)/i,
+    /importe\s*r?d?\$?\s*([\d,\.]+)/i,
+    /monto\s*r?d?\$?\s*([\d,\.]+)/i,
   ];
   for (const p of montoPatrones) {
     const m = texto.match(p);
     if (m) { monto = parseFloat(m[1].replace(/,/g, '')); break; }
   }
 
+  // ITBIS
   let itbis = null;
   const itbisMatch = texto.match(/itbis[\s:$RD]*([0-9,\.]+)/i);
   if (itbisMatch) {
@@ -139,6 +133,7 @@ function parsear(texto) {
     itbis = Math.round(monto * 0.18 * 100) / 100;
   }
 
+  // Fecha
   let fecha = null;
   const f1 = texto.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
   const f2 = texto.match(/(\d{4})[\/\-](\d{2})[\/\-](\d{2})/);
@@ -149,6 +144,7 @@ function parsear(texto) {
     fecha = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
   }
 
+  // Razón social
   const ignorar = /RNC|NCF|ITBIS|TOTAL|TEL|FAX|CORREO|EMAIL|WWW|HTTP|FECHA|FACT|HORA|DIRECCI|ZONA|C\/|NO\.|NUM/i;
   let razon_social = null;
   for (const linea of lineas.slice(0, 12)) {
@@ -161,7 +157,7 @@ function parsear(texto) {
   return { ncf, tipo_ncf, rnc, razon_social, fecha, monto, itbis, texto_ocr: texto.substring(0, 600) };
 }
 
-// ─── Respuestas ───────────────────────────────────────────────────────────────
+// ─── Respuestas WhatsApp ──────────────────────────────────────────────────────
 function respuestaFiscal(f) {
   const lines = ['✅ *Comprobante fiscal registrado*\n'];
   if (f.ncf)          lines.push(`🔢 NCF: ${f.ncf}`);
@@ -179,7 +175,7 @@ function respuestaGasto(f) {
   const lines = ['🧾 *Gasto registrado*\n', '⚠️ Sin NCF — registrado como gasto general.\n'];
   if (f.razon_social) lines.push(`🏷️ Empresa: ${f.razon_social}`);
   if (f.fecha)        lines.push(`📅 Fecha: ${f.fecha}`);
-  if (f.monto)        lines.push(`💰 Monto: RD$ ${f.monto?.toLocaleString() || 'no detectado'}`);
+  if (f.monto)        lines.push(`💰 Monto: RD$ ${(f.monto||0).toLocaleString()}`);
   lines.push(`\n📊 Ver panel: ${process.env.APP_URL}`);
   return lines.join('\n');
 }
@@ -193,31 +189,7 @@ async function sendTwilio(to, body) {
   });
 }
 
-// ─── API REST para la página web ─────────────────────────────────────────────
-app.get('/api/fiscales', async (req, res) => {
-  const { tipo, estado, desde, hasta, q } = req.query;
-  let query = supabase.from('facturas').select('*').eq('categoria', 'fiscal').order('created_at', { ascending: false });
-  if (tipo)   query = query.eq('tipo_ncf', tipo);
-  if (estado) query = query.eq('estado', estado);
-  if (desde)  query = query.gte('fecha', desde);
-  if (hasta)  query = query.lte('fecha', hasta);
-  if (q)      query = query.or(`rnc.ilike.%${q}%,razon_social.ilike.%${q}%,ncf.ilike.%${q}%`);
-  const { data, error } = await query.limit(500);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-app.get('/api/gastos', async (req, res) => {
-  const { desde, hasta, q } = req.query;
-  let query = supabase.from('facturas').select('*').eq('categoria', 'gasto').order('created_at', { ascending: false });
-  if (desde) query = query.gte('fecha', desde);
-  if (hasta) query = query.lte('fecha', hasta);
-  if (q)     query = query.or(`razon_social.ilike.%${q}%`);
-  const { data, error } = await query.limit(500);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
+// ─── API REST ─────────────────────────────────────────────────────────────────
 app.get('/api/facturas', async (req, res) => {
   const { categoria, tipo, estado, desde, hasta, q } = req.query;
   let query = supabase.from('facturas').select('*').order('created_at', { ascending: false });
@@ -254,7 +226,7 @@ app.get('/api/metricas', async (req, res) => {
   const gastos   = data?.filter(f => f.categoria === 'gasto')  || [];
   res.json({
     fiscal: { total: fiscales.length, ventas: fiscales.reduce((a,f) => a+(f.monto||0),0), itbis: fiscales.reduce((a,f) => a+(f.itbis||0),0), pendientes: fiscales.filter(f=>f.estado!=='verified').length },
-    gasto:  { total: gastos.length,   monto:  gastos.reduce((a,f)  => a+(f.monto||0),0) }
+    gasto:  { total: gastos.length, monto: gastos.reduce((a,f) => a+(f.monto||0),0) }
   });
 });
 
