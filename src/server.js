@@ -86,30 +86,38 @@ async function downloadTwilioMedia(mediaUrl) {
 
 // ─── Extraer datos de factura con Gemini IA ──────────────────────────────────
 async function ocr(imageBuffer) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-
-  const imagePart = {
-    inlineData: {
-      data: imageBuffer.toString('base64'),
-      mimeType: 'image/jpeg'
-    }
-  };
-
   const prompt = `Eres un experto en facturas dominicanas. Analiza esta imagen de factura y extrae los siguientes datos en formato JSON exacto:
 
 {
-  "ncf": "número de comprobante fiscal (formato B01XXXXXXXXX, B02XXXXXXXXX, B14XXXXXXXXX, E31XXXXXXXXX, etc.) o null si no tiene",
-  "rnc": "RNC o cédula del emisor (formato X-XX-XXXXX-X o 9 dígitos) o null si no tiene",
+  "ncf": "numero de comprobante fiscal (formato B01XXXXXXXXX, B02XXXXXXXXX, B14XXXXXXXXX, E31XXXXXXXXX, etc.) o null si no tiene",
+  "rnc": "RNC o cedula del emisor (formato X-XX-XXXXX-X o 9 digitos) o null si no tiene",
   "razon_social": "nombre de la empresa o negocio emisor",
   "fecha": "fecha en formato YYYY-MM-DD o null si no se ve",
-  "monto": "monto total como número sin símbolos o null si no se ve",
-  "itbis": "monto del ITBIS como número sin símbolos o null si no se ve"
+  "monto": "monto total como numero sin simbolos o null si no se ve",
+  "itbis": "monto del ITBIS como numero sin simbolos o null si no se ve"
 }
 
 Responde SOLO con el JSON, sin texto adicional ni markdown.`;
 
-  const result = await model.generateContent([prompt, imagePart]);
-  const text = result.response.text().trim();
+  const response = await axios.post(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
+    {
+      contents: [{
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: 'image/jpeg', data: imageBuffer.toString('base64') } }
+        ]
+      }]
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': process.env.GEMINI_API_KEY
+      }
+    }
+  );
+
+  const text = response.data.candidates[0].content.parts[0].text.trim();
   console.log('Gemini respuesta:', text);
   return text;
 }
