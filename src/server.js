@@ -3,7 +3,8 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const twilio = require('twilio');
-const Tesseract = require('tesseract.js');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const app = express();
 app.use(express.json());
@@ -40,12 +41,12 @@ app.post('/webhook-twilio', async (req, res) => {
     const mediaUrl    = req.body.MediaUrl0;
     const imageBuffer = await downloadTwilioMedia(mediaUrl);
 
-    // OCR con Tesseract (local, gratis, sin tarjeta)
-    const texto = await ocr(imageBuffer);
-    console.log('OCR resultado:', texto.substring(0, 300));
+    // Extraer datos con Gemini IA
+    const jsonTexto = await ocr(imageBuffer);
+    console.log('Gemini extrajo:', jsonTexto.substring(0, 300));
 
-    // Parsear datos de la factura
-    const factura = parsear(texto);
+    // Parsear JSON de Gemini
+    const factura = parsearGemini(jsonTexto);
     factura.telefono_emisor = from.replace('whatsapp:', '');
     factura.fecha_registro  = new Date().toISOString();
     factura.fuente          = 'whatsapp';
@@ -84,35 +85,64 @@ async function downloadTwilioMedia(mediaUrl) {
   return Buffer.from(res.data);
 }
 
-// ─── Preprocesar imagen para mejor OCR ───────────────────────────────────────
-async function preprocesarImagen(imageBuffer) {
-  const sharp = require('sharp');
-  return await sharp(imageBuffer)
-    .resize({ width: 2000, withoutEnlargement: false }) // ampliar para mejor lectura
-    .grayscale()                                         // escala de grises
-    .normalize()                                         // normalizar brillo
-    .sharpen()                                           // nitidez
-    .toBuffer();
-}
-
-// ─── OCR con Tesseract mejorado ───────────────────────────────────────────────
+// ─── Extraer datos de factura con Gemini IA ──────────────────────────────────
 async function ocr(imageBuffer) {
-  let imgProcesada;
-  try {
-    imgProcesada = await preprocesarImagen(imageBuffer);
-  } catch(e) {
-    console.log('Preprocesamiento falló, usando imagen original:', e.message);
-    imgProcesada = imageBuffer;
-  }
+  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-  const { data: { text } } = await Tesseract.recognize(imgProcesada, 'spa+eng', {
-    logger: () => {},
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:-/$@# áéíóúÁÉÍÓÚñÑ',
-  });
-  return text || '';
+  const imagePart = {
+    inlineData: {
+      data: imageBuffer.toString('base64'),
+      mimeType: 'image/jpeg'
+    }
+  };
+
+  const prompt = `Eres un experto en facturas dominicanas. Analiza esta imagen de factura y extrae los siguientes datos en formato JSON exacto:
+
+{
+  "ncf": "número de comprobante fiscal (formato B01XXXXXXXXX, B02XXXXXXXXX, B14XXXXXXXXX, E31XXXXXXXXX, etc.) o null si no tiene",
+  "rnc": "RNC o cédula del emisor (formato X-XX-XXXXX-X o 9 dígitos) o null si no tiene",
+  "razon_social": "nombre de la empresa o negocio emisor",
+  "fecha": "fecha en formato YYYY-MM-DD o null si no se ve",
+  "monto": "monto total como número sin símbolos o null si no se ve",
+  "itbis": "monto del ITBIS como número sin símbolos o null si no se ve"
 }
 
-// ─── Parser de facturas dominicanas ──────────────────────────────────────────
+Responde SOLO con el JSON, sin texto adicional ni markdown.`;
+
+  const result = await model.generateContent([prompt, imagePart]);
+  const text = result.response.text().trim();
+  console.log('Gemini respuesta:', text);
+  return text;
+}
+
+// ─── Parsear respuesta JSON de Gemini ────────────────────────────────────────
+function parsearGemini(jsonTexto) {
+  try {
+    const clean = jsonTexto.replace(/```json|```/g, '').trim();
+    const data = JSON.parse(clean);
+    return {
+      ncf:          data.ncf || null,
+      tipo_ncf:     data.ncf ? tipoNcf(data.ncf) : null,
+      rnc:          data.rnc || null,
+      razon_social: data.razon_social || null,
+      fecha:        data.fecha || null,
+      monto:        data.monto ? parseFloat(String(data.monto).replace(/,/g,'')) : null,
+      itbis:        data.itbis ? parseFloat(String(data.itbis).replace(/,/g,'')) : null,
+      texto_ocr:    jsonTexto.substring(0, 600)
+    };
+  } catch(e) {
+    console.error('Error parseando JSON de Gemini:', e.message);
+    return { ncf: null, tipo_ncf: null, rnc: null, razon_social: 'No detectado', fecha: null, monto: null, itbis: null, texto_ocr: jsonTexto };
+  }
+}
+
+function tipoNcf(ncf) {
+  const cod = ncf.substring(0, 3).toUpperCase();
+  const mapa = { B01:'Crédito Fiscal', B02:'Consumidor Final', B14:'Gubernamental', B15:'Regímenes Especiales', E31:'Electrónico CF' };
+  return mapa[cod] || cod;
+}
+
+// ─── Parser de facturas dominicanas (fallback) ────────────────────────────────
 function parsear(texto) {
   const lineas = texto.split('\n').map(l => l.trim()).filter(Boolean);
 
